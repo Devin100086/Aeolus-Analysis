@@ -2,10 +2,14 @@
 __pycache__/
 *.py[codz]
 *$py.class
+lightning_logs/
+model_checkpoints/
+results/
 
 # C extensions
 *.so
-
+data/
+.vscode/
 # Distribution / packaging
 .Python
 build/

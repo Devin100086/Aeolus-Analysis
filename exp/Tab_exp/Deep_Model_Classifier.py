@@ -1,0 +1,123 @@
+import numpy as np
+import pandas as pd
+import yaml
+from mambular.models import AutoIntClassifier, FTTransformerClassifier, MLPClassifier, TangosClassifier, \
+    TabulaRNNClassifier, SAINTClassifier, ResNetClassifier
+from sklearn.base import clone
+from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.model_selection import ParameterSampler
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+
+file_name = 'results/arr_delay_data.csv'
+df = pd.read_csv(file_name)
+df = df.dropna()
+
+df['ARR_DELAY'] = (df['ARR_DELAY'].abs() > 15.0).astype(int)
+
+df_train = df[df['FL_DAY'] <= 9].copy()
+df_valid = df[(df['FL_DAY'] > 9) & (df['FL_DAY'] <= 12)].copy()
+df_test = df[df['FL_DAY'] > 12].copy()
+
+with open('results/arr_delay_data_info.yaml', 'r') as yaml_file:
+    data_info = yaml.load(yaml_file, Loader=yaml.FullLoader)
+
+categorical_columns = data_info['columns_info']['Categorical Features']
+continuous_columns = data_info['columns_info']['Continuous Features']
+
+continuous_columns = [col for col in continuous_columns if col != 'FLIGHTS']
+categorical_columns = [col for col in categorical_columns if col != 'FL_YEAR' and col != 'FL_MONTH']
+
+encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+df_train.loc[:, categorical_columns] = encoder.fit_transform(df_train[categorical_columns])
+df_valid.loc[:, categorical_columns] = encoder.transform(df_valid[categorical_columns])
+df_test.loc[:, categorical_columns] = encoder.transform(df_test[categorical_columns])
+
+for df_split in (df_train, df_valid, df_test):
+    # Shift ids to keep categories non-negative (0 reserved for unseen values).
+    df_split.loc[:, categorical_columns] = df_split[categorical_columns].astype("int64") + 1
+
+scaler = StandardScaler()
+df_train.loc[:, continuous_columns] = scaler.fit_transform(df_train[continuous_columns])
+df_valid.loc[:, continuous_columns] = scaler.transform(df_valid[continuous_columns])
+df_test.loc[:, continuous_columns] = scaler.transform(df_test[continuous_columns])
+
+X_train = df_train[categorical_columns + continuous_columns]
+X_valid = df_valid[categorical_columns + continuous_columns]
+X_test = df_test[categorical_columns + continuous_columns]
+
+y_train = df_train['ARR_DELAY']
+y_valid = df_valid['ARR_DELAY']
+y_test = df_test['ARR_DELAY']
+
+
+models = {
+    'MLP': MLPClassifier(d_model=128),
+    'AutoInt': AutoIntClassifier(d_model=128, n_layers=4),
+    'ResNet': ResNetClassifier(),
+    'FTTransformer': FTTransformerClassifier(d_model=128, n_layers=4),
+    'Tangos': TangosClassifier(d_model=128),
+    'TabulaRNN': TabulaRNNClassifier(d_model=128),
+    'SAINT': SAINTClassifier(d_model=128),
+}
+
+results_df = pd.DataFrame(columns=['Model', 'AUC', 'ACC'])
+
+param_dist = {
+    'd_model': [64, 128, 256],
+    'n_layers': [2, 6, 10],
+    'lr': [1e-5, 1e-4, 1e-3]
+}
+
+def filter_param_dist(model, full_param_dist):
+    model_params = model.get_params().keys()
+    return {k: v for k, v in full_param_dist.items() if k in model_params}
+
+
+n_iter = 5
+fit_params = {"max_epochs": 1, "rebuild": True, "X_val": X_valid, "y_val": y_valid, "patience": 5}
+
+for model_name, base_model in models.items():
+    print(f"Searching params for {model_name}...")
+    model_param_dist = filter_param_dist(base_model, param_dist)
+    if model_param_dist:
+        param_iter = ParameterSampler(model_param_dist, n_iter=n_iter, random_state=42)
+    else:
+        param_iter = [dict()]
+
+    best_model = None
+    best_params = None
+    best_val_acc = -np.inf
+
+    for params in param_iter:
+        model = clone(base_model)
+        if params:
+            model.set_params(**params)
+        model.fit(X_train, y_train, **fit_params)
+        val_pred = model.predict(X_valid)
+        val_acc = accuracy_score(y_valid, val_pred)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_params = params
+            best_model = model
+
+    print("Best Parameters:", best_params)
+    print("Best Val ACC:", best_val_acc)
+
+    y_pred = best_model.predict(X_test)
+    if hasattr(best_model, "predict_proba"):
+        y_score = best_model.predict_proba(X_test)[:, 1]
+        auc = roc_auc_score(y_test, y_score)
+    elif hasattr(best_model, "decision_function"):
+        y_score = best_model.decision_function(X_test)
+        auc = roc_auc_score(y_test, y_score)
+    else:
+        auc = roc_auc_score(y_test, y_pred)
+    acc = accuracy_score(y_test, y_pred)
+    print(f"{model_name} - AUC: {auc}, ACC: {acc}")
+
+    result = pd.DataFrame({'Model': [model_name], 'AUC': [auc], 'ACC': [acc]})
+    results_df = pd.concat([results_df, result], ignore_index=True)
+
+results_df.to_csv('Classifier_results.csv', index=False)
+
+print('end')
