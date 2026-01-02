@@ -1,3 +1,6 @@
+import inspect
+import os
+import re
 import numpy as np
 import pandas as pd
 import yaml
@@ -11,6 +14,9 @@ from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 file_name = 'results/arr_delay_data.csv'
 df = pd.read_csv(file_name)
 df = df.dropna()
+
+year_match = re.search(r"(20\d{2})", file_name)
+year_tag = year_match.group(1) if year_match else "all"
 
 df['ARR_DELAY'] = (df['ARR_DELAY'].abs() > 15.0).astype(int)
 
@@ -69,15 +75,34 @@ param_dist = {
 }
 
 def filter_param_dist(model, full_param_dist):
-    model_params = model.get_params().keys()
+    try:
+        model_params = set(model.get_params().keys())
+    except Exception:
+        try:
+            sig = inspect.signature(model.__class__.__init__)
+            model_params = set(sig.parameters.keys())
+            model_params.discard("self")
+        except Exception:
+            return {}
     return {k: v for k, v in full_param_dist.items() if k in model_params}
 
 
 n_iter = 5
-fit_params = {"max_epochs": 1, "rebuild": True, "X_val": X_valid, "y_val": y_valid, "patience": 5}
+fit_params = {
+    "max_epochs": 1,
+    "rebuild": True,
+    "X_val": X_valid,
+    "y_val": y_valid,
+    "patience": 5,
+    "devices": 1,
+    "accelerator": "auto",
+}
 
 for model_name, base_model in models.items():
     print(f"Searching params for {model_name}...")
+    checkpoint_dir = os.path.join("checkpoints", "Tab_exp", "Classifier", model_name, year_tag)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    fit_params["checkpoint_path"] = checkpoint_dir
     model_param_dist = filter_param_dist(base_model, param_dist)
     if model_param_dist:
         param_iter = ParameterSampler(model_param_dist, n_iter=n_iter, random_state=42)
@@ -105,7 +130,11 @@ for model_name, base_model in models.items():
 
     y_pred = best_model.predict(X_test)
     if hasattr(best_model, "predict_proba"):
-        y_score = best_model.predict_proba(X_test)[:, 1]
+        proba = best_model.predict_proba(X_test)
+        if proba.ndim == 1 or proba.shape[1] == 1:
+            y_score = np.ravel(proba)
+        else:
+            y_score = proba[:, 1]
         auc = roc_auc_score(y_test, y_score)
     elif hasattr(best_model, "decision_function"):
         y_score = best_model.decision_function(X_test)

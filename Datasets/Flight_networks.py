@@ -95,7 +95,7 @@ def process_year_file(year_file):
                     g.add_nodes(1)
                     idx[index] = g.num_nodes() - 1
 
-                g.add_edge(idx[root], idx[index])
+                g.add_edges(idx[root], idx[index])
 
                 edge_features = {
                     'INTERVAL_TIME': (df1['CRS_DEP_TIME'][index] - df1['CRS_ARR_TIME'][root]).seconds,

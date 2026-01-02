@@ -5,6 +5,8 @@ __pycache__/
 lightning_logs/
 model_checkpoints/
 results/
+checkpoints/
+processed_data/
 
 # C extensions
 *.so

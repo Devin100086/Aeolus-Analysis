@@ -2,6 +2,7 @@
 import argparse
 import os
 import re
+import sys
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
@@ -11,7 +12,9 @@ import yaml
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 YEAR_FILE_RE = re.compile(r"flight_with_weather_(\d{4})\.csv$")
 
 
