@@ -46,13 +46,6 @@ run_cmd 3 python exp/Chain_exp/MogrifierLSTM.py \
   --max-epochs 50 \
   --plot
 
-run_cmd 4 python exp/Network_exp/AFM_node_embedding.py \
-  --graph-dir data/Aeolus/Flight_network/network_data_2024 \
-  --start-date 2024-01-01 \
-  --end-date 2024-12-30 \
-  --vgae-model-path vgae/node_embedding.pth \
-  --plot
-
 status=0
 for pid in "${pids[@]}"; do
   if ! wait "$pid"; then

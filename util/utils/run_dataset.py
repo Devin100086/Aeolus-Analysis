@@ -241,7 +241,7 @@ def build_parser():
     )
     pro.add_argument(
         "--info",
-        default=Path("results/arr_delay_data_info.yaml"),
+        default=Path("processed_data/arr_delay_data_info.yaml"),
         type=Path,
         help="Output YAML path.",
     )

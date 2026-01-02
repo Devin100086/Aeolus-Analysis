@@ -1,6 +1,7 @@
 import pandas as pd
 import yaml
 from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler
+from tqdm import tqdm
 
 file_name = 'filtered_flight_data.csv'
 
@@ -21,7 +22,7 @@ df.rename(columns={'MONTH': 'FL_MONTH', 'DAY_OF_MONTH': 'FL_DAY', 'DAY_OF_WEEK':
 df.drop(columns=['FL_DATE'], inplace=True)
 
 time_columns = ['CRS_DEP_TIME', 'DEP_TIME', 'WHEELS_OFF', 'WHEELS_ON', 'CRS_ARR_TIME', 'ARR_TIME']
-for col in time_columns:
+for col in tqdm(time_columns, desc="Processing time columns"):
     df[col] = pd.to_datetime(df[col]).dt.strftime('%H:%M:%S')
     df[col + '_MIN'] = pd.to_datetime(df[col]).dt.hour * 60 + pd.to_datetime(df[col]).dt.minute
 
@@ -30,7 +31,7 @@ df.drop(columns=time_columns, inplace=True)
 encoder_columns = ['OP_CARRIER', 'ORIGIN', 'DEST']
 
 encoder = LabelEncoder()
-for col in encoder_columns:
+for col in tqdm(encoder_columns, desc="Encoding categorical columns"):
     df[col] = encoder.fit_transform(df[col])
 
 categorical_columns = ['OP_CARRIER', 'OP_CARRIER_FL_NUM',

@@ -9,7 +9,7 @@ from matplotlib.colors import Normalize
 
 # -------- 1. 构建航班链轨迹数据 --------
 def prepare_flight_chain():
-    file_path = "D:\\project\\Delay_data\\Datasets\\data\\flight_with_weather_2024.csv"
+    file_path = "/data0/ps/wucunqi/homework/Aeolus-Analysis/data/Aeolus/Flight_Tab/flight_with_weather_2024.csv"
     df = pd.read_csv(file_path)
 
     # 排序：按飞机编号和时间顺序构建轨迹

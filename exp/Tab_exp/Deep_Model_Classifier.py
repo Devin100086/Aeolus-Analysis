@@ -1,6 +1,7 @@
 import inspect
 import os
 import re
+import argparse
 import numpy as np
 import pandas as pd
 import yaml
@@ -11,7 +12,26 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from sklearn.model_selection import ParameterSampler
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 
-file_name = 'results/arr_delay_data.csv'
+parser = argparse.ArgumentParser(description="Tabular classification experiment")
+parser.add_argument(
+    "--data-csv",
+    default="results/arr_delay_data.csv",
+    help="Path to input CSV (default: results/arr_delay_data.csv)",
+)
+parser.add_argument(
+    "--info-yaml",
+    default="results/arr_delay_data_info.yaml",
+    help="Path to feature info YAML (default: results/arr_delay_data_info.yaml)",
+)
+parser.add_argument(
+    "--max-epochs",
+    type=int,
+    default=1,
+    help="Training epochs per trial (default: 1)",
+)
+args = parser.parse_args()
+
+file_name = args.data_csv
 df = pd.read_csv(file_name)
 df = df.dropna()
 
@@ -24,7 +44,7 @@ df_train = df[df['FL_DAY'] <= 9].copy()
 df_valid = df[(df['FL_DAY'] > 9) & (df['FL_DAY'] <= 12)].copy()
 df_test = df[df['FL_DAY'] > 12].copy()
 
-with open('results/arr_delay_data_info.yaml', 'r') as yaml_file:
+with open(args.info_yaml, 'r') as yaml_file:
     data_info = yaml.load(yaml_file, Loader=yaml.FullLoader)
 
 categorical_columns = data_info['columns_info']['Categorical Features']
@@ -89,7 +109,7 @@ def filter_param_dist(model, full_param_dist):
 
 n_iter = 5
 fit_params = {
-    "max_epochs": 1,
+    "max_epochs": args.max_epochs,
     "rebuild": True,
     "X_val": X_valid,
     "y_val": y_valid,
