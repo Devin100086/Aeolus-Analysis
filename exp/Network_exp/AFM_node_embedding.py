@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from dgl import load_graphs
 from dgl.data import DGLDataset
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
@@ -84,7 +84,7 @@ def parse_args() -> Config:
     parser.add_argument("--vgae-hidden2", type=int, default=8)
     parser.add_argument("--label-threshold", type=int, default=15)
     parser.add_argument("--feature-columns", default=None)
-    parser.add_argument("--include-embedding", dest="include_embedding", action="store_true", default=False)
+    parser.add_argument("--include-embedding", dest="include_embedding", action="store_true", default=True)
     parser.add_argument("--no-embedding", dest="include_embedding", action="store_false")
     parser.add_argument("--embedding-dim", type=int, default=8)
     parser.add_argument("--train-size", type=int, default=200)
@@ -486,6 +486,25 @@ def compute_auc(preds: torch.Tensor, labels: torch.Tensor) -> float:
         return 0.5
 
 
+def compute_binary_metrics(
+    preds: torch.Tensor,
+    labels: torch.Tensor,
+    threshold: float = 0.5,
+) -> dict:
+    preds_np = preds.detach().cpu().numpy().reshape(-1)
+    labels_np = labels.detach().cpu().numpy().reshape(-1)
+    if labels_np.size == 0:
+        return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+    pred_labels = (preds_np >= threshold).astype(int)
+    labels_np = labels_np.astype(int)
+    return {
+        "accuracy": float(accuracy_score(labels_np, pred_labels)),
+        "precision": float(precision_score(labels_np, pred_labels, zero_division=0)),
+        "recall": float(recall_score(labels_np, pred_labels, zero_division=0)),
+        "f1": float(f1_score(labels_np, pred_labels, zero_division=0)),
+    }
+
+
 def oversample_batch(features: torch.Tensor, labels: torch.Tensor):
     try:
         from imblearn.over_sampling import RandomOverSampler
@@ -606,10 +625,12 @@ def evaluate_loader(
             labels.append(targets.cpu())
     preds = torch.cat(preds, dim=0).squeeze()
     labels = torch.cat(labels, dim=0).squeeze()
-    return {
+    metrics = {
         "loss": float(np.mean(losses)) if losses else 0.0,
         "auc": compute_auc(preds, labels),
     }
+    metrics.update(compute_binary_metrics(preds, labels))
+    return metrics
 
 
 def save_metrics_csv(

@@ -11,13 +11,24 @@ run_cmd() {
 }
 
 run_cmd 0 python exp/Network_exp/Dynamic_delay_gnn.py \
+          --graph-dir data/Aeolus/Flight_network/network_data_2024 \
+          --start-date 2024-01-01 \
+          --end-date 2024-12-30 \
+          --model-type gcn \
+          --gat-heads 4 \
+          --use-residual \
+          --norm layer \
+          --epochs 50
+
+
+run_cmd 1 python exp/Network_exp/Dynamic_delay_gnn.py \
   --graph-dir data/Aeolus/Flight_network/network_data_2024 \
   --start-date 2024-01-01 \
   --end-date 2024-12-30 \
   --feature-mode split \
   --epochs 50
 
-run_cmd 1 python exp/Network_exp/Temporal_delay_gnn.py \
+run_cmd 2 python exp/Network_exp/Temporal_delay_gnn.py \
  --graph-dir data/Aeolus/Flight_network/network_data_2024 \
   --start-date 2024-01-01 \
   --end-date 2024-12-30 \

@@ -10,23 +10,45 @@ from mambular.models import AutoIntRegressor, FTTransformerRegressor, MLPRegress
 from sklearn.base import clone
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.model_selection import ParameterSampler
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OrdinalEncoder, RobustScaler, StandardScaler
 
 parser = argparse.ArgumentParser(description="Tabular regression experiment")
+parser.add_argument(
+    "--data-csv",
+    default="data/Aeolus/Flight_Tab/Tab/Flight_tab_2021.csv",
+    help="Path to input CSV (default: data/Aeolus/Flight_Tab/Tab/Flight_tab_2021.csv)",
+)
+parser.add_argument(
+    "--info-yaml",
+    default="Datasets/arr_delay_data_info.yaml",
+    help="Path to feature info YAML (default: Datasets/arr_delay_data_info.yaml)",
+)
 parser.add_argument(
     "--max-epochs",
     type=int,
     default=1,
     help="Training epochs per trial (default: 1)",
 )
+parser.add_argument(
+    "--target-scale",
+    choices=["none", "standard", "robust"],
+    default="standard",
+    help="Scale target to stabilize loss (default: standard)",
+)
+parser.add_argument(
+    "--target-clip-quantile",
+    type=float,
+    default=0.0,
+    help="Optional symmetric clipping quantile for DEP_DELAY (default: 0.0 disables)",
+)
 args = parser.parse_args()
 
-file_name = '/data0/ps/wucunqi/homework/Aeolus-Analysis/data/Aeolus/Flight_Tab/Tab/Flight_tab_2021.csv'
+file_name = args.data_csv
 df = pd.read_csv(file_name)
 year_match = re.search(r"(20\d{2})", file_name)
 year_tag = year_match.group(1) if year_match else "all"
 
-with open('/data0/ps/wucunqi/homework/Aeolus-Analysis/Datasets/arr_delay_data_info.yaml', 'r') as yaml_file:
+with open(args.info_yaml, 'r') as yaml_file:
     data_info = yaml.load(yaml_file, Loader=yaml.FullLoader)
 
 categorical_columns = data_info['columns_info']['Categorical Features']
@@ -75,9 +97,26 @@ X_train = df_train[categorical_columns + continuous_columns]
 X_valid = df_valid[categorical_columns + continuous_columns]
 X_test = df_test[categorical_columns + continuous_columns]
 
-y_train = df_train['DEP_DELAY']
-y_valid = df_valid['DEP_DELAY']
-y_test = df_test['DEP_DELAY']
+y_train = df_train['DEP_DELAY'].astype("float32").to_numpy()
+y_valid = df_valid['DEP_DELAY'].astype("float32").to_numpy()
+y_test = df_test['DEP_DELAY'].astype("float32").to_numpy()
+
+if 0.0 < args.target_clip_quantile < 0.5:
+    lower, upper = np.quantile(y_train, [args.target_clip_quantile, 1 - args.target_clip_quantile])
+    y_train = np.clip(y_train, lower, upper)
+    y_valid = np.clip(y_valid, lower, upper)
+    y_test = np.clip(y_test, lower, upper)
+
+y_scaler = None
+if args.target_scale != "none":
+    y_scaler = StandardScaler() if args.target_scale == "standard" else RobustScaler()
+    y_train_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1)).reshape(-1)
+    y_valid_scaled = y_scaler.transform(y_valid.reshape(-1, 1)).reshape(-1)
+    y_test_scaled = y_scaler.transform(y_test.reshape(-1, 1)).reshape(-1)
+else:
+    y_train_scaled = y_train
+    y_valid_scaled = y_valid
+    y_test_scaled = y_test
 
 
 models = {
@@ -116,7 +155,7 @@ fit_params = {
     "max_epochs": args.max_epochs,
     "rebuild": True,
     "X_val": X_valid,
-    "y_val": y_valid,
+    "y_val": y_valid_scaled,
     "patience": 5,
     "devices": 1,
     "accelerator": "auto",
@@ -141,8 +180,10 @@ for model_name, base_model in models.items():
         model = clone(base_model)
         if params:
             model.set_params(**params)
-        model.fit(X_train, y_train, **fit_params)
+        model.fit(X_train, y_train_scaled, **fit_params)
         val_pred = np.ravel(model.predict(X_valid))
+        if y_scaler is not None:
+            val_pred = y_scaler.inverse_transform(val_pred.reshape(-1, 1)).reshape(-1)
         val_mse = mean_squared_error(y_valid, val_pred)
         if val_mse < best_val_mse:
             best_val_mse = val_mse
@@ -153,6 +194,8 @@ for model_name, base_model in models.items():
     print("Best Val MSE:", best_val_mse)
 
     y_pred = np.ravel(best_model.predict(X_test))
+    if y_scaler is not None:
+        y_pred = y_scaler.inverse_transform(y_pred.reshape(-1, 1)).reshape(-1)
     mse = mean_squared_error(y_test, y_pred)
     mae = mean_absolute_error(y_test, y_pred)
 

@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dgl import load_graphs
-from dgl.nn import GraphConv
-from sklearn.metrics import roc_auc_score
+from dgl.nn import GATConv, GraphConv, SAGEConv
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from tqdm import tqdm
 
 
@@ -50,6 +50,7 @@ class Config:
     start_date: date
     end_date: date
     output_dir: Path
+    model_type: str
     hidden_dim: int
     num_layers: int
     dropout: float
@@ -66,6 +67,13 @@ class Config:
     sparse_embed_dim: int
     batch_nodes: int
     oversample: bool
+    gat_heads: int
+    gat_dropout: float
+    sage_agg: str
+    norm: str
+    use_residual: bool
+    use_class_weight: bool
+    prob_threshold: float
 
 
 def parse_args() -> Config:
@@ -74,6 +82,7 @@ def parse_args() -> Config:
     parser.add_argument("--start-date", default="2024-01-01")
     parser.add_argument("--end-date", default="2024-12-30")
     parser.add_argument("--output-dir", default="checkpoints/DynamicGNN")
+    parser.add_argument("--model-type", choices=["gcn", "graphsage", "gat"], default="gcn")
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -90,6 +99,14 @@ def parse_args() -> Config:
     parser.add_argument("--sparse-embed-dim", type=int, default=8)
     parser.add_argument("--batch-nodes", type=int, default=4096)
     parser.add_argument("--oversample", action="store_true")
+    parser.add_argument("--gat-heads", type=int, default=4)
+    parser.add_argument("--gat-dropout", type=float, default=0.1)
+    parser.add_argument("--sage-agg", choices=["mean", "pool", "lstm", "gcn"], default="mean")
+    parser.add_argument("--norm", choices=["none", "layer", "batch"], default="layer")
+    parser.add_argument("--use-residual", action="store_true")
+    parser.add_argument("--no-class-weight", dest="use_class_weight", action="store_false")
+    parser.add_argument("--prob-threshold", type=float, default=0.5)
+    parser.set_defaults(use_class_weight=True)
     args = parser.parse_args()
 
     return Config(
@@ -97,6 +114,7 @@ def parse_args() -> Config:
         start_date=date.fromisoformat(args.start_date),
         end_date=date.fromisoformat(args.end_date),
         output_dir=Path(args.output_dir),
+        model_type=args.model_type,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         dropout=args.dropout,
@@ -113,6 +131,13 @@ def parse_args() -> Config:
         sparse_embed_dim=args.sparse_embed_dim,
         batch_nodes=args.batch_nodes,
         oversample=args.oversample,
+        gat_heads=args.gat_heads,
+        gat_dropout=args.gat_dropout,
+        sage_agg=args.sage_agg,
+        norm=args.norm,
+        use_residual=args.use_residual,
+        use_class_weight=args.use_class_weight,
+        prob_threshold=args.prob_threshold,
     )
 
 
@@ -328,6 +353,12 @@ class TemporalGraphModel(nn.Module):
         num_layers: int,
         dropout: float,
         task: str,
+        model_type: str = "gcn",
+        gat_heads: int = 4,
+        gat_dropout: float = 0.1,
+        sage_agg: str = "mean",
+        norm: str = "layer",
+        use_residual: bool = False,
         feature_mode: str = "feat",
         dense_names: List[str] | None = None,
         sparse_names: List[str] | None = None,
@@ -338,9 +369,33 @@ class TemporalGraphModel(nn.Module):
     ):
         super().__init__()
         self.layers = nn.ModuleList()
+        self.norms = nn.ModuleList() if norm != "none" else None
+        self.model_type = model_type
+        self.use_residual = use_residual
+        self.gat_heads = max(1, gat_heads)
         dims = [in_dim] + [hidden_dim] * (num_layers - 1)
         for in_dim_i in dims:
-            self.layers.append(GraphConv(in_dim_i, hidden_dim, allow_zero_in_degree=True))
+            if model_type == "gcn":
+                layer = GraphConv(in_dim_i, hidden_dim, allow_zero_in_degree=True)
+            elif model_type == "graphsage":
+                layer = SAGEConv(in_dim_i, hidden_dim, aggregator_type=sage_agg)
+            elif model_type == "gat":
+                layer = GATConv(
+                    in_dim_i,
+                    hidden_dim,
+                    num_heads=self.gat_heads,
+                    feat_drop=dropout,
+                    attn_drop=gat_dropout,
+                    allow_zero_in_degree=True,
+                )
+            else:
+                raise ValueError(f"Unknown model_type: {model_type}")
+            self.layers.append(layer)
+            if self.norms is not None:
+                if norm == "layer":
+                    self.norms.append(nn.LayerNorm(hidden_dim))
+                else:
+                    self.norms.append(nn.BatchNorm1d(hidden_dim))
         self.dropout = nn.Dropout(dropout)
         self.out = nn.Linear(hidden_dim, 1)
         self.task = task
@@ -395,9 +450,21 @@ class TemporalGraphModel(nn.Module):
 
     def forward(self, g, w):
         h = self.build_features(g)
-        for layer in self.layers:
-            h = layer(g, h, edge_weight=w)
+        for idx, layer in enumerate(self.layers):
+            h_in = h
+            if self.model_type == "gcn":
+                h = layer(g, h, edge_weight=w)
+            elif self.model_type == "gat":
+                h = layer(g, h)
+                if h.dim() == 3:
+                    h = h.mean(dim=1)
+            else:
+                h = layer(g, h)
             h = F.relu(h)
+            if self.norms is not None:
+                h = self.norms[idx](h)
+            if self.use_residual and h.shape == h_in.shape:
+                h = h + h_in
             h = self.dropout(h)
         out = self.out(h).squeeze(-1)
         return out
@@ -450,7 +517,40 @@ def sample_node_indices(
     return torch.from_numpy(idx).long()
 
 
-def evaluate(model, graph_paths: List[Path], device: torch.device, task: str, threshold_minutes: int):
+def compute_binary_metrics(
+    preds: torch.Tensor,
+    labels: torch.Tensor,
+    threshold: float = 0.5,
+) -> dict:
+    preds_np = preds.detach().cpu().numpy().reshape(-1)
+    labels_np = labels.detach().cpu().numpy().reshape(-1)
+    if labels_np.size == 0:
+        return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+    pred_labels = (preds_np >= threshold).astype(int)
+    labels_np = labels_np.astype(int)
+    return {
+        "accuracy": float(accuracy_score(labels_np, pred_labels)),
+        "precision": float(precision_score(labels_np, pred_labels, zero_division=0)),
+        "recall": float(recall_score(labels_np, pred_labels, zero_division=0)),
+        "f1": float(f1_score(labels_np, pred_labels, zero_division=0)),
+    }
+
+
+def compute_auc(preds: torch.Tensor, labels: torch.Tensor) -> float:
+    try:
+        return roc_auc_score(labels.cpu().numpy(), preds.cpu().numpy())
+    except ValueError:
+        return 0.5
+
+
+def evaluate(
+    model,
+    graph_paths: List[Path],
+    device: torch.device,
+    task: str,
+    threshold_minutes: int,
+    prob_threshold: float,
+):
     model.eval()
     preds = []
     labels = []
@@ -470,14 +570,49 @@ def evaluate(model, graph_paths: List[Path], device: torch.device, task: str, th
             labels.append(y.detach().cpu())
 
     if not preds:
-        return {"loss": 0.0, "auc": 0.5}
+        return {
+            "loss": 0.0,
+            "auc": 0.5,
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+        }
     preds = torch.nan_to_num(torch.cat(preds, dim=0).squeeze(), nan=0.0)
     labels = torch.nan_to_num(torch.cat(labels, dim=0).squeeze(), nan=0.0)
     if task == "classification":
-        auc = roc_auc_score(labels.numpy(), torch.sigmoid(preds).numpy())
+        probs = torch.sigmoid(preds)
+        auc = compute_auc(probs, labels)
+        metrics = compute_binary_metrics(probs, labels, threshold=prob_threshold)
     else:
         auc = 0.0
-    return {"loss": float(np.mean(losses)) if losses else 0.0, "auc": auc}
+        metrics = {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+    return {
+        "loss": float(np.mean(losses)) if losses else 0.0,
+        "auc": auc,
+        **metrics,
+    }
+
+
+def compute_pos_weight(
+    graph_paths: List[Path],
+    task: str,
+    threshold_minutes: int,
+) -> torch.Tensor | None:
+    if task != "classification":
+        return None
+    pos = 0
+    neg = 0
+    for path in tqdm(graph_paths, desc="Computing class weights"):
+        g = load_graph(path)
+        if g.num_nodes() == 0:
+            continue
+        labels = get_labels(g, task, threshold_minutes)
+        pos += int((labels > 0.5).sum().item())
+        neg += int((labels <= 0.5).sum().item())
+    if pos == 0 or neg == 0:
+        return None
+    return torch.tensor([neg / pos], dtype=torch.float32)
 
 
 def save_metrics_csv(metrics_train: dict, metrics_val: dict, metrics_test: dict, output_dir: Path):
@@ -518,6 +653,7 @@ def main() -> None:
     dense_names = []
     sparse_names = []
     sparse_cardinalities = []
+    dense_min, dense_max = (None, None)
     if config.feature_mode == "split":
         available = set(sample_graph.ndata.keys())
         dense_names, missing_dense = resolve_feature_names(DENSE_FEATURE_NAMES, available)
@@ -531,7 +667,6 @@ def main() -> None:
         if not dense_names and not sparse_names:
             raise ValueError("No dense/sparse features found for split mode.")
         sparse_cardinalities = compute_sparse_cardinalities(graph_paths, sparse_names) if sparse_names else []
-        dense_min, dense_max = (None, None)
         if dense_names:
             dense_min, dense_max = compute_dense_minmax(graph_paths, dense_names)
         dense_dim = 0
@@ -549,6 +684,12 @@ def main() -> None:
         num_layers=config.num_layers,
         dropout=config.dropout,
         task=config.task,
+        model_type=config.model_type,
+        gat_heads=config.gat_heads,
+        gat_dropout=config.gat_dropout,
+        sage_agg=config.sage_agg,
+        norm=config.norm,
+        use_residual=config.use_residual,
         feature_mode=config.feature_mode,
         dense_names=dense_names,
         sparse_names=sparse_names,
@@ -558,7 +699,15 @@ def main() -> None:
         dense_max=dense_max,
     ).to(device)
 
-    loss_fn = nn.BCEWithLogitsLoss() if config.task == "classification" else nn.MSELoss()
+    pos_weight = None
+    if config.use_class_weight and config.task == "classification":
+        pos_weight = compute_pos_weight(train_paths, config.task, config.threshold_minutes)
+        if pos_weight is not None:
+            pos_weight = pos_weight.to(device)
+    if config.task == "classification":
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight) if pos_weight is not None else nn.BCEWithLogitsLoss()
+    else:
+        loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     best_val_auc = -1.0
     best_model_path = output_dir / "dynamic_gnn_best.pth"
@@ -604,18 +753,57 @@ def main() -> None:
                 progress.set_postfix(loss=f"{epoch_loss/max(1, step):.4f}")
 
         torch.save(model.state_dict(), last_model_path)
-        val_metrics = evaluate(model, val_paths, device, config.task, config.threshold_minutes)
+        val_metrics = evaluate(
+            model,
+            val_paths,
+            device,
+            config.task,
+            config.threshold_minutes,
+            config.prob_threshold,
+        )
         if val_metrics["auc"] > best_val_auc:
             best_val_auc = val_metrics["auc"]
             torch.save(model.state_dict(), best_model_path)
-        print(f"Epoch {epoch}: val_loss={val_metrics['loss']:.4f}, val_auc={val_metrics['auc']:.4f}")
+        print(
+            "Epoch {epoch}: val_loss={loss:.4f}, val_auc={auc:.4f}, "
+            "val_acc={acc:.4f}, val_prec={prec:.4f}, val_rec={rec:.4f}, val_f1={f1:.4f}".format(
+                epoch=epoch,
+                loss=val_metrics["loss"],
+                auc=val_metrics["auc"],
+                acc=val_metrics["accuracy"],
+                prec=val_metrics["precision"],
+                rec=val_metrics["recall"],
+                f1=val_metrics["f1"],
+            )
+        )
 
     if best_model_path.exists():
         model.load_state_dict(torch.load(best_model_path, map_location=device))
 
-    metrics_train = evaluate(model, train_paths, device, config.task, config.threshold_minutes)
-    metrics_val = evaluate(model, val_paths, device, config.task, config.threshold_minutes)
-    metrics_test = evaluate(model, test_paths, device, config.task, config.threshold_minutes)
+    metrics_train = evaluate(
+        model,
+        train_paths,
+        device,
+        config.task,
+        config.threshold_minutes,
+        config.prob_threshold,
+    )
+    metrics_val = evaluate(
+        model,
+        val_paths,
+        device,
+        config.task,
+        config.threshold_minutes,
+        config.prob_threshold,
+    )
+    metrics_test = evaluate(
+        model,
+        test_paths,
+        device,
+        config.task,
+        config.threshold_minutes,
+        config.prob_threshold,
+    )
     save_metrics_csv(metrics_train, metrics_val, metrics_test, output_dir)
 
     if config.predict_graph and config.predict_node is not None:

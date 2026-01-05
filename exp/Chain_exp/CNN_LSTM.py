@@ -20,6 +20,8 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+METRIC_KEYS = ("Accuracy", "Recall", "Precision", "F1", "AUC")
+DEFAULT_LABEL_NAMES = ("ARR.Delay", "DEP.Delay")
 
 @dataclass
 class Config:
@@ -127,13 +129,61 @@ def unpack_batch(batch: Iterable[torch.Tensor]):
     if len(batch) < 4:
         raise ValueError(f"Unexpected batch format: {len(batch)} tensors")
     dense_feat, sparse_feat, labels, valid_lens = batch[:4]
-    return dense_feat, sparse_feat, labels, valid_lens
+    delays = batch[4] if len(batch) > 4 else None
+    return dense_feat, sparse_feat, labels, valid_lens, delays
 
 
-def get_labels(two_labels: torch.Tensor) -> torch.Tensor:
-    if two_labels.dim() == 3:
-        return two_labels[:, :, 0]
-    return two_labels
+def get_labels(two_labels: torch.Tensor, delays: torch.Tensor | None = None) -> torch.Tensor:
+    labels = two_labels
+    if labels.dim() == 2:
+        labels = labels.unsqueeze(-1)
+    if delays is not None and labels.size(-1) == 1 and delays.dim() >= 2 and delays.size(-1) == 2:
+        labels = (delays > 15).to(labels.dtype)
+    return labels
+
+
+def get_label_names(num_labels: int) -> list[str]:
+    if num_labels == 1:
+        return [DEFAULT_LABEL_NAMES[0]]
+    if num_labels == len(DEFAULT_LABEL_NAMES):
+        return list(DEFAULT_LABEL_NAMES)
+    return [f"Label_{idx}" for idx in range(num_labels)]
+
+
+def compute_binary_metrics(final_labels: np.ndarray, final_probs: np.ndarray) -> dict:
+    if final_labels.size == 0:
+        return {key: 0.0 for key in METRIC_KEYS}
+    try:
+        fpr, tpr, thresholds = roc_curve(final_labels, final_probs)
+        optimal_threshold = thresholds[np.argmax(tpr - fpr)]
+    except ValueError:
+        optimal_threshold = 0.5
+    try:
+        auc = roc_auc_score(final_labels, final_probs)
+    except ValueError:
+        auc = 0.5
+    pred_labels = (final_probs >= optimal_threshold).astype(int)
+    return {
+        "Accuracy": accuracy_score(final_labels, pred_labels),
+        "Recall": recall_score(final_labels, pred_labels, zero_division=0),
+        "Precision": precision_score(final_labels, pred_labels, zero_division=0),
+        "F1": f1_score(final_labels, pred_labels),
+        "AUC": auc,
+    }
+
+
+def infer_label_count(sample: tuple[torch.Tensor, ...]) -> tuple[int, bool]:
+    labels = sample[2]
+    delays = sample[4] if len(sample) > 4 else None
+    if labels.dim() >= 2:
+        num_labels = labels.size(-1)
+    else:
+        num_labels = 1
+    uses_delays = False
+    if num_labels == 1 and delays is not None and delays.dim() >= 2 and delays.size(-1) == 2:
+        num_labels = 2
+        uses_delays = True
+    return num_labels, uses_delays
 
 
 class FlightDelayCNNLSTM(nn.Module):
@@ -186,22 +236,23 @@ def sequence_mask(x: torch.Tensor, valid_len: torch.Tensor, value: float = 0.0) 
     return x
 
 
-class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
+class MaskedBCEWithLogitsLoss(nn.Module):
     def __init__(self, pos_weight: float = 4.5):
-        super().__init__(reduction="none")
+        super().__init__()
         self.pos_weight = pos_weight
 
     def forward(self, pred: torch.Tensor, label: torch.Tensor, valid_len: torch.Tensor) -> torch.Tensor:
-        weights = torch.ones_like(label, dtype=torch.float, device=label.device)
+        label = label.float()
+        loss = nn.functional.binary_cross_entropy_with_logits(pred, label, reduction="none")
+        weights = torch.ones_like(label, dtype=loss.dtype, device=label.device)
         weights[label == 1] *= self.pos_weight
-        weights = sequence_mask(weights, valid_len)
-        unweighted_loss = super().forward(pred.permute(0, 2, 1), label)
-        weighted_loss = unweighted_loss * weights
-        total_loss = weighted_loss.sum()
-        total_valid_len = valid_len.sum()
-        if total_valid_len > 0:
-            return total_loss / total_valid_len
-        return torch.tensor(0.0, device=weighted_loss.device)
+        weighted_loss = loss * weights
+        masked_loss = sequence_mask(weighted_loss, valid_len)
+        total_loss = masked_loss.sum()
+        total_valid = valid_len.sum() * label.size(-1)
+        if total_valid > 0:
+            return total_loss / total_valid
+        return torch.tensor(0.0, device=loss.device)
 
 
 def train(
@@ -216,7 +267,7 @@ def train(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=config.lr, weight_decay=config.weight_decay
     )
-    criterion = MaskedSoftmaxCELoss()
+    criterion = MaskedBCEWithLogitsLoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config.max_epochs, eta_min=1e-6
     )
@@ -244,18 +295,19 @@ def train(
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config.max_epochs}")
 
         for batch in progress_bar:
-            dense_feat, sparse_feat, two_labels, valid_lens = unpack_batch(batch)
+            dense_feat, sparse_feat, two_labels, valid_lens, delays = unpack_batch(batch)
             dense_feat = dense_feat.to(device)
             sparse_feat = sparse_feat.to(device)
             two_labels = two_labels.to(device)
             valid_lens = valid_lens.to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            labels = get_labels(two_labels)
+            delays = delays.to(device) if delays is not None else None
+            labels = get_labels(two_labels, delays)
             features = torch.cat([dense_feat, sparse_feat], dim=-1)
             with torch.cuda.amp.autocast(enabled=use_amp):
                 outputs = model(features)
-                loss = criterion(outputs, labels.long(), valid_lens)
+                loss = criterion(outputs, labels, valid_lens)
             loss.backward()
             optimizer.step()
 
@@ -275,15 +327,16 @@ def train(
         val_loss = 0.0
         with torch.no_grad():
             for batch in valid_loader:
-                dense_feat, sparse_feat, two_labels, valid_lens = unpack_batch(batch)
+                dense_feat, sparse_feat, two_labels, valid_lens, delays = unpack_batch(batch)
                 dense_feat = dense_feat.to(device)
                 sparse_feat = sparse_feat.to(device)
                 two_labels = two_labels.to(device)
                 valid_lens = valid_lens.to(device)
-                labels = get_labels(two_labels)
+                delays = delays.to(device) if delays is not None else None
+                labels = get_labels(two_labels, delays)
                 features = torch.cat([dense_feat, sparse_feat], dim=-1)
                 outputs = model(features)
-                val_loss += criterion(outputs, labels.long(), valid_lens).item()
+                val_loss += criterion(outputs, labels, valid_lens).item()
 
         avg_val_loss = val_loss / max(len(valid_loader), 1)
 
@@ -311,13 +364,14 @@ def evaluate_model(model: nn.Module, dataloader: DataLoader, device: torch.devic
 
     with torch.no_grad():
         for batch in dataloader:
-            dense_feat, sparse_feat, two_labels, valid_lens = unpack_batch(batch)
+            dense_feat, sparse_feat, two_labels, valid_lens, delays = unpack_batch(batch)
             dense_feat = dense_feat.to(device)
             sparse_feat = sparse_feat.to(device)
             two_labels = two_labels.to(device)
             valid_lens = valid_lens.to(device)
 
-            labels = get_labels(two_labels)
+            delays = delays.to(device) if delays is not None else None
+            labels = get_labels(two_labels, delays)
             features = torch.cat([dense_feat, sparse_feat], dim=-1)
             logits = model(features)
 
@@ -330,25 +384,14 @@ def evaluate_model(model: nn.Module, dataloader: DataLoader, device: torch.devic
     valid_lens = torch.cat(all_valid_lens, dim=0).numpy()
 
     position_mask = np.arange(logits.shape[1]) < valid_lens[:, None]
-    valid_probs = torch.softmax(torch.from_numpy(logits), dim=-1)[..., 1].numpy()
-    final_probs = valid_probs[position_mask].flatten()
-    final_labels = labels[position_mask].flatten()
-
-    fpr, tpr, thresholds = roc_curve(final_labels, final_probs)
-    optimal_threshold = thresholds[np.argmax(tpr - fpr)]
-    try:
-        auc = roc_auc_score(final_labels, final_probs)
-    except ValueError:
-        auc = 0.5
-    pred_labels = (final_probs >= optimal_threshold).astype(int)
-
-    return {
-        "Accuracy": accuracy_score(final_labels, pred_labels),
-        "Precision": precision_score(final_labels, pred_labels, zero_division=0),
-        "Recall": recall_score(final_labels, pred_labels, zero_division=0),
-        "F1": f1_score(final_labels, pred_labels),
-        "AUC": auc,
-    }
+    probs = 1.0 / (1.0 + np.exp(-logits))
+    label_names = get_label_names(labels.shape[-1])
+    metrics = {}
+    for idx, label_name in enumerate(label_names):
+        final_probs = probs[:, :, idx][position_mask].flatten()
+        final_labels = labels[:, :, idx][position_mask].flatten()
+        metrics[label_name] = compute_binary_metrics(final_labels, final_probs)
+    return metrics
 
 
 def plot_lr_schedule(lr_history: list, output_base: Path) -> None:
@@ -410,19 +453,23 @@ def save_metrics_csv(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "metrics.csv"
-    fieldnames = ["Metric", "Train", "Val", "Test"]
+    fieldnames = ["Label", "Metric", "Train", "Val", "Test"]
     with output_path.open("w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        for key in metrics_train:
-            writer.writerow(
-                {
-                    "Metric": key,
-                    "Train": metrics_train[key],
-                    "Val": metrics_valid.get(key, ""),
-                    "Test": metrics_test.get(key, ""),
-                }
-            )
+        for label_name, train_metrics in metrics_train.items():
+            valid_metrics = metrics_valid.get(label_name, {})
+            test_metrics = metrics_test.get(label_name, {})
+            for metric_name in METRIC_KEYS:
+                writer.writerow(
+                    {
+                        "Label": label_name,
+                        "Metric": metric_name,
+                        "Train": train_metrics.get(metric_name, ""),
+                        "Val": valid_metrics.get(metric_name, ""),
+                        "Test": test_metrics.get(metric_name, ""),
+                    }
+                )
 
 
 def main() -> None:
@@ -437,6 +484,15 @@ def main() -> None:
     train_loader, valid_loader, test_loader = build_dataloaders(
         train_dataset, valid_dataset, test_dataset, config.batch_size, config.num_workers
     )
+    num_labels, uses_delays = infer_label_count(train_dataset[0])
+    if config.output_size != num_labels:
+        print(
+            f"Warning: output_size {config.output_size} does not match dataset labels "
+            f"({num_labels}). Using output_size={num_labels}."
+        )
+        config.output_size = num_labels
+    if num_labels == 1 and not uses_delays:
+        print("Info: dataset provides a single label; only ARR.Delay will be reported.")
 
     model = FlightDelayCNNLSTM(
         feature_columns=feature_columns,
@@ -451,13 +507,20 @@ def main() -> None:
     metrics_valid = evaluate_model(model, valid_loader, device)
     metrics_test = evaluate_model(model, test_loader, device)
 
-    print("\n{:<15} {:<10} {:<10} {:<10}".format("Metric", "Train", "Val", "Test"))
-    for key in metrics_train:
-        print(
-            "{:<15} {:<10.4f} {:<10.4f} {:<10.4f}".format(
-                f"{key}:", metrics_train[key], metrics_valid[key], metrics_test[key]
+    for label_name, train_metrics in metrics_train.items():
+        print(f"\n{label_name}")
+        print("{:<15} {:<10} {:<10} {:<10}".format("Metric", "Train", "Val", "Test"))
+        valid_metrics = metrics_valid.get(label_name, {})
+        test_metrics = metrics_test.get(label_name, {})
+        for metric_name in METRIC_KEYS:
+            print(
+                "{:<15} {:<10.4f} {:<10.4f} {:<10.4f}".format(
+                    metric_name,
+                    train_metrics[metric_name],
+                    valid_metrics[metric_name],
+                    test_metrics[metric_name],
+                )
             )
-        )
 
     save_metrics_csv(metrics_train, metrics_valid, metrics_test, config.checkpoint_path.parent)
 
