@@ -27,6 +27,18 @@ parser.add_argument(
     default=1,
     help="Training epochs per trial (default: 1)",
 )
+parser.add_argument(
+    "--target",
+    choices=["ARR_DELAY", "DEP_DELAY"],
+    default="DEP_DELAY",
+    help="Target column to model (default: DEP_DELAY)",
+)
+parser.add_argument(
+    "--results-csv",
+    default=None,
+    help="Output CSV path for metrics (default: LSS_results_DEP.csv for DEP_DELAY, "
+         "LSS_results_{TARGET}.csv otherwise)",
+)
 args = parser.parse_args()
 
 file_name = args.data_csv
@@ -36,13 +48,17 @@ df = df.dropna()
 year_match = re.search(r"(20\d{2})", file_name)
 year_tag = year_match.group(1) if year_match else "all"
 
+target_col = args.target
+if target_col not in df.columns:
+    raise ValueError(f"Missing target column: {target_col}")
+
 with open(args.info_yaml, 'r') as yaml_file:
     data_info = yaml.load(yaml_file, Loader=yaml.FullLoader)
 
 categorical_columns = data_info['columns_info']['Categorical Features']
 continuous_columns = data_info['columns_info']['Continuous Features']
 
-continuous_columns = [col for col in continuous_columns if col not in ['FLIGHTS', 'DEP_DELAY']]
+continuous_columns = [col for col in continuous_columns if col not in ['FLIGHTS', 'ARR_DELAY', 'DEP_DELAY']]
 categorical_columns = [col for col in categorical_columns if col != 'FL_YEAR' and col != 'FL_MONTH']
 
 df_train = df[df['FL_DAY'] <= 9].copy()
@@ -64,17 +80,17 @@ df_valid.loc[:, continuous_columns] = feature_scaler.transform(df_valid[continuo
 df_test.loc[:, continuous_columns] = feature_scaler.transform(df_test[continuous_columns])
 
 target_scaler = StandardScaler()
-df_train.loc[:, ['DEP_DELAY']] = target_scaler.fit_transform(df_train[['DEP_DELAY']])
-df_valid.loc[:, ['DEP_DELAY']] = target_scaler.transform(df_valid[['DEP_DELAY']])
-df_test.loc[:, ['DEP_DELAY']] = target_scaler.transform(df_test[['DEP_DELAY']])
+df_train.loc[:, [target_col]] = target_scaler.fit_transform(df_train[[target_col]])
+df_valid.loc[:, [target_col]] = target_scaler.transform(df_valid[[target_col]])
+df_test.loc[:, [target_col]] = target_scaler.transform(df_test[[target_col]])
 
 X_train = df_train[categorical_columns + continuous_columns]
 X_valid = df_valid[categorical_columns + continuous_columns]
 X_test = df_test[categorical_columns + continuous_columns]
 
-y_train = df_train['DEP_DELAY']
-y_valid = df_valid['DEP_DELAY']
-y_test = df_test['DEP_DELAY']
+y_train = df_train[target_col]
+y_valid = df_valid[target_col]
+y_test = df_test[target_col]
 
 
 models = {
@@ -122,7 +138,7 @@ fit_params = {
 
 for model_name, base_model in models.items():
     print(f"Searching params for {model_name}...")
-    checkpoint_dir = os.path.join("checkpoints", "Tab_exp", "LSS", model_name, year_tag)
+    checkpoint_dir = os.path.join("checkpoints", "Tab_exp", "LSS", target_col, model_name, year_tag)
     os.makedirs(checkpoint_dir, exist_ok=True)
     fit_params["checkpoint_path"] = checkpoint_dir
     model_param_dist = filter_param_dist(base_model, param_dist)
@@ -176,6 +192,13 @@ for model_name, base_model in models.items():
     result = pd.DataFrame({'Model': [model_name], 'NLL': [nll], 'CRPS': [crps]})
     results_df = pd.concat([results_df, result], ignore_index=True)
 
-results_df.to_csv('LSS_results_DEP.csv', index=False)
+results_path = args.results_csv
+if results_path is None:
+    if target_col == "DEP_DELAY":
+        results_path = "LSS_results_DEP.csv"
+    else:
+        results_path = f"LSS_results_{target_col}.csv"
+results_df.to_csv(results_path, index=False)
+print(f"Saved results to {results_path}")
 
 print('end')

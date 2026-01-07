@@ -29,6 +29,31 @@ parser.add_argument(
     default=1,
     help="Training epochs per trial (default: 1)",
 )
+parser.add_argument(
+    "--target",
+    choices=["ARR_DELAY", "DEP_DELAY"],
+    default="ARR_DELAY",
+    help="Target column to classify (default: ARR_DELAY)",
+)
+parser.add_argument(
+    "--delay-threshold",
+    type=float,
+    default=15.0,
+    help="Delay threshold in minutes for positive class (default: 15.0)",
+)
+parser.add_argument(
+    "--delay-label",
+    choices=["abs", "positive"],
+    default=None,
+    help="Label rule: abs uses |delay| > threshold, positive uses delay > threshold "
+         "(default: abs for ARR_DELAY, positive for DEP_DELAY)",
+)
+parser.add_argument(
+    "--results-csv",
+    default=None,
+    help="Output CSV path for metrics (default: Classifier_results.csv for ARR_DELAY, "
+         "Classifier_results_{TARGET}.csv otherwise)",
+)
 args = parser.parse_args()
 
 file_name = args.data_csv
@@ -38,7 +63,18 @@ df = df.dropna()
 year_match = re.search(r"(20\d{2})", file_name)
 year_tag = year_match.group(1) if year_match else "all"
 
-df['ARR_DELAY'] = (df['ARR_DELAY'].abs() > 15.0).astype(int)
+target_col = args.target
+if target_col not in df.columns:
+    raise ValueError(f"Missing target column: {target_col}")
+
+delay_label = args.delay_label
+if delay_label is None:
+    delay_label = "abs" if target_col == "ARR_DELAY" else "positive"
+
+if delay_label == "abs":
+    df[target_col] = (df[target_col].abs() > args.delay_threshold).astype(int)
+else:
+    df[target_col] = (df[target_col] > args.delay_threshold).astype(int)
 
 df_train = df[df['FL_DAY'] <= 9].copy()
 df_valid = df[(df['FL_DAY'] > 9) & (df['FL_DAY'] <= 12)].copy()
@@ -52,6 +88,8 @@ continuous_columns = data_info['columns_info']['Continuous Features']
 
 continuous_columns = [col for col in continuous_columns if col != 'FLIGHTS']
 categorical_columns = [col for col in categorical_columns if col != 'FL_YEAR' and col != 'FL_MONTH']
+continuous_columns = [col for col in continuous_columns if col not in ['ARR_DELAY', 'DEP_DELAY']]
+categorical_columns = [col for col in categorical_columns if col not in ['ARR_DELAY', 'DEP_DELAY']]
 
 encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
 df_train.loc[:, categorical_columns] = encoder.fit_transform(df_train[categorical_columns])
@@ -71,9 +109,9 @@ X_train = df_train[categorical_columns + continuous_columns]
 X_valid = df_valid[categorical_columns + continuous_columns]
 X_test = df_test[categorical_columns + continuous_columns]
 
-y_train = df_train['ARR_DELAY']
-y_valid = df_valid['ARR_DELAY']
-y_test = df_test['ARR_DELAY']
+y_train = df_train[target_col]
+y_valid = df_valid[target_col]
+y_test = df_test[target_col]
 
 
 models = {
@@ -120,7 +158,7 @@ fit_params = {
 
 for model_name, base_model in models.items():
     print(f"Searching params for {model_name}...")
-    checkpoint_dir = os.path.join("checkpoints", "Tab_exp", "Classifier", model_name, year_tag)
+    checkpoint_dir = os.path.join("checkpoints", "Tab_exp", "Classifier", target_col, model_name, year_tag)
     os.makedirs(checkpoint_dir, exist_ok=True)
     fit_params["checkpoint_path"] = checkpoint_dir
     model_param_dist = filter_param_dist(base_model, param_dist)
@@ -167,6 +205,13 @@ for model_name, base_model in models.items():
     result = pd.DataFrame({'Model': [model_name], 'AUC': [auc], 'ACC': [acc]})
     results_df = pd.concat([results_df, result], ignore_index=True)
 
-results_df.to_csv('Classifier_results.csv', index=False)
+results_path = args.results_csv
+if results_path is None:
+    if target_col == "ARR_DELAY":
+        results_path = "Classifier_results.csv"
+    else:
+        results_path = f"Classifier_results_{target_col}.csv"
+results_df.to_csv(results_path, index=False)
+print(f"Saved results to {results_path}")
 
 print('end')

@@ -32,6 +32,7 @@ class Config:
     hidden_size: int
     num_layers: int
     output_size: int
+    label_mode: str
     lr: float
     weight_decay: float
     max_epochs: int
@@ -51,6 +52,12 @@ def parse_args() -> Config:
     parser.add_argument("--hidden-size", type=int, default=32)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--output-size", type=int, default=2)
+    parser.add_argument(
+        "--label-mode",
+        choices=["auto", "arr", "dep", "both"],
+        default="auto",
+        help="Label selection: auto uses dataset labels, arr/dep selects one, both predicts both (default: auto).",
+    )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--max-epochs", type=int, default=50)
@@ -69,6 +76,7 @@ def parse_args() -> Config:
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         output_size=args.output_size,
+        label_mode=args.label_mode,
         lr=args.lr,
         weight_decay=args.weight_decay,
         max_epochs=args.max_epochs,
@@ -92,9 +100,9 @@ def load_feature_columns(path: Path):
 
 
 def load_datasets(data_dir: Path, year: str) -> Tuple[TensorDataset, TensorDataset, TensorDataset]:
-    train_path = data_dir / f"flight_chain_train_{year}.pt"
-    valid_path = data_dir / f"flight_chain_val_{year}.pt"
-    test_path = data_dir / f"flight_chain_test_{year}.pt"
+    train_path = data_dir / f"train_flight_chain_{year}.pt"
+    valid_path = data_dir / f"val_flight_chain_{year}.pt"
+    test_path = data_dir / f"test_flight_chain_{year}.pt"
     for path in (train_path, valid_path, test_path):
         if not path.exists():
             raise FileNotFoundError(f"Missing dataset file: {path}")
@@ -132,17 +140,38 @@ def unpack_batch(batch: Iterable[torch.Tensor]):
     return dense_feat, sparse_feat, labels, valid_lens, delays
 
 
-def get_labels(two_labels: torch.Tensor, delays: torch.Tensor | None = None) -> torch.Tensor:
+def get_labels(
+    two_labels: torch.Tensor,
+    delays: torch.Tensor | None = None,
+    label_mode: str = "auto",
+) -> torch.Tensor:
     labels = two_labels
     if labels.dim() == 2:
         labels = labels.unsqueeze(-1)
     if delays is not None and labels.size(-1) == 1 and delays.dim() >= 2 and delays.size(-1) == 2:
         labels = (delays > 15).to(labels.dtype)
+
+    if label_mode == "auto":
+        return labels
+    if label_mode == "both":
+        if labels.size(-1) < 2:
+            raise ValueError("label-mode=both requires two labels or delay pairs in the dataset.")
+        return labels[..., :2]
+    if label_mode in ("arr", "dep"):
+        idx = 0 if label_mode == "arr" else 1
+        if labels.size(-1) < idx + 1:
+            raise ValueError(f"label-mode={label_mode} requires two labels or delay pairs in the dataset.")
+        selected = labels[..., idx]
+        if selected.dim() == 2:
+            selected = selected.unsqueeze(-1)
+        return selected
     return labels
 
 
-def get_label_names(num_labels: int) -> list[str]:
+def get_label_names(num_labels: int, label_mode: str = "auto") -> list[str]:
     if num_labels == 1:
+        if label_mode == "dep":
+            return [DEFAULT_LABEL_NAMES[1]]
         return [DEFAULT_LABEL_NAMES[0]]
     if num_labels == len(DEFAULT_LABEL_NAMES):
         return list(DEFAULT_LABEL_NAMES)
@@ -171,7 +200,7 @@ def compute_binary_metrics(final_labels: np.ndarray, final_probs: np.ndarray) ->
     }
 
 
-def infer_label_count(sample: tuple[torch.Tensor, ...]) -> tuple[int, bool]:
+def infer_label_count(sample: tuple[torch.Tensor, ...], label_mode: str) -> tuple[int, bool]:
     labels = sample[2]
     delays = sample[4] if len(sample) > 4 else None
     if labels.dim() >= 2:
@@ -179,6 +208,14 @@ def infer_label_count(sample: tuple[torch.Tensor, ...]) -> tuple[int, bool]:
     else:
         num_labels = 1
     uses_delays = False
+    if label_mode in ("arr", "dep"):
+        if num_labels == 1 and delays is not None and delays.dim() >= 2 and delays.size(-1) == 2:
+            uses_delays = True
+        return 1, uses_delays
+    if label_mode == "both":
+        if num_labels == 1 and delays is not None and delays.dim() >= 2 and delays.size(-1) == 2:
+            uses_delays = True
+        return 2, uses_delays
     if num_labels == 1 and delays is not None and delays.dim() >= 2 and delays.size(-1) == 2:
         num_labels = 2
         uses_delays = True
@@ -296,7 +333,7 @@ def train(
 
             optimizer.zero_grad(set_to_none=True)
             delays = delays.to(device) if delays is not None else None
-            labels = get_labels(two_labels, delays)
+            labels = get_labels(two_labels, delays, config.label_mode)
             features = torch.cat([dense_feat, sparse_feat], dim=-1)
             with torch.cuda.amp.autocast(enabled=use_amp):
                 outputs = model(features)
@@ -326,7 +363,7 @@ def train(
                 two_labels = two_labels.to(device)
                 valid_lens = valid_lens.to(device)
                 delays = delays.to(device) if delays is not None else None
-                labels = get_labels(two_labels, delays)
+                labels = get_labels(two_labels, delays, config.label_mode)
                 features = torch.cat([dense_feat, sparse_feat], dim=-1)
                 outputs = model(features)
                 val_loss += criterion(outputs, labels, valid_lens).item()
@@ -351,7 +388,12 @@ def train(
     return loss_history, lr_history
 
 
-def evaluate_model(model: nn.Module, dataloader: DataLoader, device: torch.device):
+def evaluate_model(
+    model: nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    label_mode: str,
+):
     model.eval()
     all_logits, all_labels, all_valid_lens = [], [], []
 
@@ -364,7 +406,7 @@ def evaluate_model(model: nn.Module, dataloader: DataLoader, device: torch.devic
             valid_lens = valid_lens.to(device)
 
             delays = delays.to(device) if delays is not None else None
-            labels = get_labels(two_labels, delays)
+            labels = get_labels(two_labels, delays, label_mode)
             features = torch.cat([dense_feat, sparse_feat], dim=-1)
             logits = model(features)
 
@@ -378,7 +420,7 @@ def evaluate_model(model: nn.Module, dataloader: DataLoader, device: torch.devic
 
     position_mask = np.arange(logits.shape[1]) < valid_lens[:, None]
     probs = 1.0 / (1.0 + np.exp(-logits))
-    label_names = get_label_names(labels.shape[-1])
+    label_names = get_label_names(labels.shape[-1], label_mode)
     metrics = {}
     for idx, label_name in enumerate(label_names):
         final_probs = probs[:, :, idx][position_mask].flatten()
@@ -477,7 +519,13 @@ def main() -> None:
     train_loader, valid_loader, test_loader = build_dataloaders(
         train_dataset, valid_dataset, test_dataset, config.batch_size, config.num_workers
     )
-    num_labels, uses_delays = infer_label_count(train_dataset[0])
+    sample = train_dataset[0]
+    num_labels, uses_delays = infer_label_count(sample, config.label_mode)
+    sample_labels = sample[2]
+    label_dim = sample_labels.size(-1) if sample_labels.dim() >= 2 else 1
+    has_delays = len(sample) > 4 and sample[4] is not None and sample[4].dim() >= 2 and sample[4].size(-1) == 2
+    if config.label_mode in ("both", "dep") and label_dim < 2 and not has_delays:
+        raise ValueError(f"label-mode={config.label_mode} requires two labels or delay pairs in the dataset.")
     if config.output_size != num_labels:
         print(
             f"Warning: output_size {config.output_size} does not match dataset labels "
@@ -485,7 +533,8 @@ def main() -> None:
         )
         config.output_size = num_labels
     if num_labels == 1 and not uses_delays:
-        print("Info: dataset provides a single label; only ARR.Delay will be reported.")
+        label_name = "DEP.Delay" if config.label_mode == "dep" else "ARR.Delay"
+        print(f"Info: dataset provides a single label; only {label_name} will be reported.")
 
     model = FlightDelayGRU(
         feature_columns=feature_columns,
@@ -496,9 +545,9 @@ def main() -> None:
 
     loss_history, lr_history = train(model, train_loader, valid_loader, device, config)
 
-    metrics_train = evaluate_model(model, train_loader, device)
-    metrics_valid = evaluate_model(model, valid_loader, device)
-    metrics_test = evaluate_model(model, test_loader, device)
+    metrics_train = evaluate_model(model, train_loader, device, config.label_mode)
+    metrics_valid = evaluate_model(model, valid_loader, device, config.label_mode)
+    metrics_test = evaluate_model(model, test_loader, device, config.label_mode)
 
     for label_name, train_metrics in metrics_train.items():
         print(f"\n{label_name}")

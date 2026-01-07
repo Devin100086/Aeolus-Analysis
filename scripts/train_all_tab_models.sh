@@ -6,7 +6,7 @@ MAX_EPOCHS=50
 
 run_year() {
   local year="$1"
-  local data_csv="processed_data/arr_delay_data_${year}.csv"
+  local data_csv="processed_data/arr_delay_data_${year}_06_01_to_06_15.csv"
 
   if [[ ! -f "$data_csv" ]]; then
     echo "Skip ${year}: missing ${data_csv}"
@@ -22,9 +22,11 @@ run_year() {
     pids+=("$!")
   }
 
-  run_cmd 0 python exp/Tab_exp/Deep_Model_Classifier.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS"
+  run_cmd 0 python exp/Tab_exp/Deep_Model_Classifier.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS" --target "ARR_DELAY"
+  # run_cmd 1 python exp/Tab_exp/Deep_Model_Classifier.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS" --target "ARR_DELAY"
   # run_cmd 1 python exp/Tab_exp/Deep_Model_Regressor.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS"
-  run_cmd 2 python exp/Tab_exp/Deep_Model_LSS.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS"
+  run_cmd 2 python exp/Tab_exp/Deep_Model_LSS.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS" --target "ARR_DELAY"
+  # run_cmd 3 python exp/Tab_exp/Deep_Model_LSS.py --data-csv "$data_csv" --info-yaml "$INFO_YAML" --max-epochs "$MAX_EPOCHS" --target "ARR_DELAY"
 
   local status=0
   for pid in "${pids[@]}"; do

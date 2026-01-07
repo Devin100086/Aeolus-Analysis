@@ -277,9 +277,16 @@ class FlightGraphDataset(DGLDataset):
                 min_values = torch.min(torch.stack((min_values, dense_min)), dim=0)[0]
                 max_values = torch.max(torch.stack((max_values, dense_max)), dim=0)[0]
 
-            bins = [self.label_threshold]
-            new_label = np.digitize(g.ndata["label"], bins)
-            g.ndata["label"] = torch.from_numpy(new_label)
+            if "ARR_DELAY" in g.ndata:
+                labels = g.ndata["ARR_DELAY"].float() / 60.0
+            elif "label" in g.ndata:
+                labels = g.ndata["label"].float()
+            else:
+                raise ValueError("Graph is missing 'label' and 'ARR_DELAY' in ndata.")
+            labels = torch.nan_to_num(labels, nan=0.0)
+            if labels.dim() > 1:
+                labels = labels.squeeze()
+            g.ndata["label"] = (labels * 60 > self.label_threshold).float()
 
             graphs.append(g)
             current += timedelta(days=1)

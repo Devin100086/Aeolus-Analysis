@@ -50,8 +50,8 @@ def compute_feat_nums(paths: List[str]) -> List[int]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate new_feature_columns.pkl for chain models.")
-    parser.add_argument("--data-dir", default="data/Aeolus/Flight_chain/chain_data_2024")
-    parser.add_argument("--year", default="2024")
+    parser.add_argument("--data-dir", default="data/Aeolus/Flight_chain/chain_data_2023")
+    parser.add_argument("--year", default="2023")
     parser.add_argument("--train-path", default=None)
     parser.add_argument("--valid-path", default=None)
     parser.add_argument("--test-path", default=None)
@@ -66,9 +66,9 @@ def main() -> None:
         paths = [args.train_path, args.valid_path, args.test_path]
     else:
         paths = [
-            os.path.join(args.data_dir, f"flight_chain_train_{args.year}.pt"),
-            os.path.join(args.data_dir, f"flight_chain_val_{args.year}.pt"),
-            os.path.join(args.data_dir, f"flight_chain_test_{args.year}.pt"),
+            os.path.join(args.data_dir, f"train_flight_chain_{args.year}.pt"),
+            os.path.join(args.data_dir, f"val_flight_chain_{args.year}.pt"),
+            os.path.join(args.data_dir, f"test_flight_chain_{args.year}.pt"),
         ]
     for path in paths:
         if not os.path.exists(path):

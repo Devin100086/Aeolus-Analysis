@@ -1,11 +1,47 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import norm
 from matplotlib.gridspec import GridSpec
+import os
 import matplotlib
-matplotlib.use('TkAgg')
+
+
+def _configure_matplotlib_backend():
+    """Pick a backend that works both locally and on headless servers."""
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not has_display:
+        matplotlib.use("Agg", force=True)
+        return
+
+    try:
+        matplotlib.use("TkAgg", force=True)
+    except Exception:
+        # Fall back to default backend if Tk is unavailable.
+        pass
+
+
+_configure_matplotlib_backend()
+
+import matplotlib.pyplot as plt
+
+
+def set_roman_soft_style():
+    """Use Roman (serif/Times-like) fonts and a softer color theme."""
+    sns.set_theme(style="whitegrid")
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": [
+                "Times New Roman",
+                "Times",
+                "Nimbus Roman",
+                "DejaVu Serif",
+            ],
+            "mathtext.fontset": "stix",
+            "axes.unicode_minus": False,
+        }
+    )
 
 
 def remove_outliers_percentile(df, column, lower=0.01, upper=0.90):
@@ -22,6 +58,8 @@ def plot_delay_distributions(data_path, delay_types=['ARR_DELAY', 'DEP_DELAY'], 
         delay_types (list): 需分析的延误类型列表
         figsize (tuple): 图像尺寸
     """
+    set_roman_soft_style()
+
     # 1. 数据加载与清洗
     try:
         df = pd.read_csv(data_path)
@@ -41,14 +79,15 @@ def plot_delay_distributions(data_path, delay_types=['ARR_DELAY', 'DEP_DELAY'], 
         'bins': 50,
         'alpha': 0.6,
         'stat': 'density',  # 修改点：将density改为stat='density'
-        'edgecolor': 'k',
+        'edgecolor': '0.25',
         'linewidth': 0.5
     }
     plot_kwargs = {
         'linewidth': 2,
         'linestyle': '-'
     }
-    colors = ['steelblue', 'forestgreen']
+    colors = sns.color_palette('Set2', n_colors=max(len(delay_types), 2))
+    fit_color = sns.color_palette('Set2', n_colors=3)[2]
 
     # 4. 对每种延误类型绘图
     for i, delay_type in enumerate(delay_types):
@@ -70,11 +109,11 @@ def plot_delay_distributions(data_path, delay_types=['ARR_DELAY', 'DEP_DELAY'], 
         mu, std = delay_data.mean(), delay_data.std()
         x = np.linspace(delay_data.min(), delay_data.max(), 100)
         pdf = norm.pdf(x, mu, std)
-        ax.plot(x, pdf, color='darkred',** plot_kwargs,
+        ax.plot(x, pdf, color=fit_color,** plot_kwargs,
         label = f'Normal Fit\nμ={mu:.1f}, σ={std:.1f}')
 
         # 样式设置
-        ax.set_title(f'{delay_type} Distribution_2020', fontsize=14, pad=10)
+        ax.set_title(f'{delay_type} Distribution', fontsize=14, pad=10)
         ax.set_xlabel('Delay (minutes)', fontsize=12)
         ax.set_ylabel('Probability Density', fontsize=12)
         ax.legend(fontsize=10, framealpha=0.9)
@@ -87,13 +126,15 @@ def plot_delay_distributions(data_path, delay_types=['ARR_DELAY', 'DEP_DELAY'], 
 
     # 5. 保存和显示
     plt.tight_layout()
-    plt.savefig('flight_delays_2020.pdf', dpi=300, bbox_inches='tight')
-    plt.show()
-    print("可视化完成，图像已保存为 flight_delays_2024.pdf")
+    output_path = 'flight_delays_2024.pdf'
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    if "agg" not in matplotlib.get_backend().lower():
+        plt.show()
+    print(f"可视化完成，图像已保存为 {output_path}")
 
 
 # 使用示例
 plot_delay_distributions(
-    data_path='D:\project\Delay_data\Datasets\data\\flight_with_weather_2020.csv',
+    data_path='/data0/ps/wucunqi/homework/Aeolus-Analysis/data/Aeolus/Flight_Tab/flight_with_weather_2024.csv',
     delay_types=['ARR_DELAY', 'DEP_DELAY']
 )
