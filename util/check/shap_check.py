@@ -1,3 +1,9 @@
+import os
+
+# Default to GPU 1 (can override by exporting CUDA_VISIBLE_DEVICES before running).
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+
 import pandas as pd
 import numpy as np
 import shap
